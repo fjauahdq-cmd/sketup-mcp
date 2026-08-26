@@ -1,4 +1,5 @@
 import express from "express";
+import crypto from "crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -11,7 +12,24 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   process.exit(1);
 }
 
-// As RPCs são security definer e só operam nos projetos do dono do token MCP.
+// ---- Criptografia compatível com o app (a.a.a.oB) ----
+// Arquivos de projeto no disco: Base64(AES/CBC/PKCS5Padding(json, chave=iv="sketchwaresecure"))
+const SK_KEY = Buffer.from("sketchwaresecure", "utf8"); // 16 bytes = AES-128
+
+function encryptText(plain) {
+  const cipher = crypto.createCipheriv("aes-128-cbc", SK_KEY, SK_KEY);
+  return Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]).toString("base64");
+}
+
+function decryptText(content) {
+  try {
+    const decipher = crypto.createDecipheriv("aes-128-cbc", SK_KEY, SK_KEY);
+    return Buffer.concat([decipher.update(Buffer.from(String(content).trim(), "base64")), decipher.final()]).toString("utf8");
+  } catch {
+    return null; // não estava criptografado (ex.: projeto antigo em JSON puro)
+  }
+}
+
 async function rpc(name, params) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
     method: "POST",
@@ -40,10 +58,6 @@ function asText(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
-// ---- Estrutura de um projeto SKET-UP (formato Sketchware) ----
-// data = { sc_id, config: {...}, files: { "project": "...", "view": "...", "logic": "...", ... } }
-// Cada valor de files é o TEXTO do arquivo como o app grava no disco (JSON Gson).
-
 const STANDARD_FILES = ["project", "view", "logic", "resource", "library"];
 
 function buildSkeleton(appName, packageName) {
@@ -66,7 +80,8 @@ function buildSkeleton(appName, packageName) {
     color_control_highlight: 587202559,
     color_control_normal: -1979711488,
   };
-  const files = {
+  const files = {};
+  for (const [name, content] of Object.entries({
     project: JSON.stringify(config),
     view: JSON.stringify([
       { fileName: "main", fileType: 0, keyboardSetting: 0, orientation: 0, presetName: "", views: [] },
@@ -74,8 +89,19 @@ function buildSkeleton(appName, packageName) {
     logic: "[]",
     resource: "[]",
     library: "{}",
-  };
+  })) {
+    files[name] = encryptText(content); // gravado criptografado, como o app espera
+  }
   return { scId, config, files };
+}
+
+// Lê um arquivo do projeto descriptografando quando necessário
+function readFilePlain(files, path) {
+  const value = files?.[path];
+  if (value == null) return null;
+  if (typeof value !== "string") return value; // marcador binário etc.
+  const plain = decryptText(value);
+  return plain ?? value; // se não descriptografar, devolve como está
 }
 
 function summarizeView(v) {
@@ -144,7 +170,7 @@ async function saveProjectData(token, row, newData) {
 }
 
 function createServer(token) {
-  const server = new McpServer({ name: "sketup-mcp", version: "2.0.0" });
+  const server = new McpServer({ name: "sketup-mcp", version: "2.1.0" });
 
   server.registerTool(
     "list_projects",
@@ -155,16 +181,24 @@ function createServer(token) {
   server.registerTool(
     "get_project",
     {
-      description: "Lê um projeto completo: config (nome, pacote, cores) + mapa de arquivos (project, view, logic, resource, library)",
+      description: "Lê um projeto completo: config (nome, pacote, cores) + arquivos (já descriptografados)",
       inputSchema: { id: z.string().describe("ID do projeto") },
     },
-    async ({ id }) => asText(await getProject(token, id))
+    async ({ id }) => {
+      const row = await getProject(token, id);
+      const files = row?.data?.files ?? {};
+      const plainFiles = {};
+      for (const path of Object.keys(files)) {
+        plainFiles[path] = readFilePlain(files, path);
+      }
+      return asText({ ...row, data: { ...(row.data ?? {}), files: plainFiles } });
+    }
   );
 
   server.registerTool(
     "create_project",
     {
-      description: "Cria um projeto novo válido (esqueleto com tela main). Depois do sync ele aparece no app.",
+      description: "Cria um projeto novo válido (esqueleto com tela main, arquivos criptografados). Aparece no app após o sync.",
       inputSchema: {
         app_name: z.string().describe("Nome do app (ex.: Minha Lista)"),
         package_name: z.string().describe("Pacote (ex.: com.meuapp.lista)"),
@@ -179,14 +213,14 @@ function createServer(token) {
         p_data: { sc_id: scId, config, files },
         p_sc_id: scId,
       });
-      return asText({ created: row, note: "Projeto criado na nuvem. No app, abra com a sincronização para baixar." });
+      return asText({ created: row, note: "Projeto criado na nuvem. No app, rode a sincronização para baixar." });
     }
   );
 
   server.registerTool(
     "get_file",
     {
-      description: "Lê um arquivo de um projeto (project, view, logic, resource, library ou outro caminho)",
+      description: "Lê um arquivo do projeto (view, logic, resource, library, project...) já descriptografado",
       inputSchema: {
         project_id: z.string(),
         path: z.string().describe("ex.: view"),
@@ -198,25 +232,24 @@ function createServer(token) {
       if (!(path in files)) {
         return asText({ error: "arquivo não encontrado", available: Object.keys(files) });
       }
-      const value = files[path];
-      return asText({ path, content: typeof value === "string" ? value : value });
+      return asText({ path, content: readFilePlain(files, path) });
     }
   );
 
   server.registerTool(
     "save_file",
     {
-      description: "Grava um arquivo de um projeto (texto). Marca o projeto como atualizado para o sync.",
+      description: "Grava um arquivo do projeto (texto puro — o servidor criptografa). Marca o projeto como atualizado para o sync.",
       inputSchema: {
         project_id: z.string(),
         path: z.string(),
-        content: z.string(),
+        content: z.string().describe("Conteúdo em texto puro (JSON)"),
       },
     },
     async ({ project_id, path, content }) => {
       const row = await getProject(token, project_id);
       const data = row?.data ?? {};
-      const files = { ...(data.files ?? {}), [path]: content };
+      const files = { ...(data.files ?? {}), [path]: encryptText(content) };
       const newData = { ...data, files };
       const saved = await saveProjectData(token, row, newData);
       return asText({ saved: true, updated_at: saved.updated_at, path });
@@ -231,7 +264,7 @@ function createServer(token) {
     },
     async ({ project_id }) => {
       const row = await getProject(token, project_id);
-      const viewText = row?.data?.files?.view;
+      const viewText = readFilePlain(row?.data?.files, "view");
       if (!viewText) return asText({ error: "projeto sem arquivo view" });
       return asText(summarizeViews(viewText));
     }
@@ -262,7 +295,7 @@ const app = express();
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "sketup-mcp", version: "2.0.0", time: new Date().toISOString() });
+  res.json({ ok: true, service: "sketup-mcp", version: "2.1.0", time: new Date().toISOString() });
 });
 
 app.post("/mcp", async (req, res) => {
@@ -290,4 +323,4 @@ app.get("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: us
 app.delete("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: use POST" }));
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`sketup-mcp v2 ouvindo na porta ${port}`));
+app.listen(port, () => console.log(`sketup-mcp v2.1 ouvindo na porta ${port}`));
