@@ -13,8 +13,8 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 // ---- Formato de arquivo do app ----
-// Cada arquivo de projeto é binário: AES-128-CBC(texto UTF-8), chave = IV = "sketchwaresecure".
-// Na nuvem os arquivos trafegam como { "__b64": "<base64 dos bytes criptografados>" }.
+// Arquivos de projeto = bytes criptografados: AES-128-CBC(texto UTF-8), chave = IV = "sketchwaresecure".
+// Na nuvem trafegam como { "__b64": "<base64 dos bytes criptografados>" }.
 const SK_KEY = Buffer.from("sketchwaresecure", "utf8");
 
 function encryptFile(plain) {
@@ -30,7 +30,7 @@ function decryptFile(value) {
       const decipher = crypto.createDecipheriv("aes-128-cbc", SK_KEY, SK_KEY);
       return Buffer.concat([decipher.update(raw), decipher.final()]).toString("utf8");
     }
-    if (typeof value === "string") return value; // legado em texto puro
+    if (typeof value === "string") return value;
     return value;
   } catch {
     return typeof value === "string" ? value : null;
@@ -65,9 +65,13 @@ function asText(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
-// ---- Estrutura de um projeto SKET-UP ----
-// files: { "list/project": meta criptografada, "data/view": telas, "data/logic": lógica,
-//          "data/file": declaração de telas, "data/resource": recursos, "data/library": libs }
+// ---- Estrutura REAL de um projeto SKET-UP (extraída de um projeto criado pelo app) ----
+// list/project        → config (versões como texto, cores como decimais, my_sc_reg_dt)
+// data/file           → seções @activity / @customview (1 JSON por linha)
+// data/view           → seções @tela.xml_fab (FAB) e @tela.xml (1 JSON de widget por linha)
+// data/logic          → vazio em projeto novo
+// data/resource       → seções @images/@sounds/@fonts
+// data/library        → seções @firebaseDB/@compat/@admob/@googleMap com libType 0/1/2/3
 
 const STANDARD_FILES = ["list/project", "data/view", "data/logic", "data/file", "data/resource", "data/library"];
 
@@ -78,60 +82,49 @@ const VIEW_TYPES = {
   15: "CalendarView", 16: "FAB", 17: "AdView",
 };
 
-function rootLinearView() {
-  return {
-    adSize: "", adUnitId: "", alpha: 1.0, checked: 0, choiceMode: 0, clickable: 1,
-    customView: "", dividerHeight: 1, enabled: 1, firstDayOfWeek: 1, id: "linear1",
-    image: { rotate: 0, scaleType: "CENTER" }, indeterminate: "false", index: 0,
-    layout: {
-      backgroundColor: 16777215, gravity: 0, height: -1, layoutGravity: 0,
-      marginBottom: 0, marginLeft: 0, marginRight: 0, marginTop: 0, orientation: 1,
-      paddingBottom: 8, paddingLeft: 8, paddingRight: 8, paddingTop: 8, weight: 0,
-      weightSum: 0, width: -1,
-    },
-    max: 100, parent: "", parentType: 0, preId: "", preIndex: 0, preParentType: 0,
-    progress: 0, progressStyle: "?android:progressBarStyle", scaleX: 1.0, scaleY: 1.0,
-    spinnerMode: 1,
-    text: {
-      hint: "", hintColor: -10453621, imeOption: 1, inputType: 1, line: 0,
-      singleLine: 0, text: "", textColor: -16777216, textFont: "default_font",
-      textSize: 12, textType: 0,
-    },
-    translationX: 0.0, translationY: 0.0, type: 0,
-  };
+// FAB padrão — copiado de um projeto real criado pelo app
+const DEFAULT_FAB = { adSize: "", adUnitId: "", alpha: 1.0, checked: 0, choiceMode: 0, clickable: 1, convert: "", customView: "", dividerHeight: 1, enabled: 1, firstDayOfWeek: 1, id: "_fab", image: { rotate: 0, scaleType: "CENTER" }, indeterminate: "false", index: 0, inject: "", layout: { backgroundColor: 16777215, borderColor: -16740915, gravity: 0, height: -2, layoutGravity: 85, marginBottom: 16, marginLeft: 16, marginRight: 16, marginTop: 16, orientation: -1, paddingBottom: 0, paddingLeft: 0, paddingRight: 0, paddingTop: 0, weight: 0, weightSum: 0, width: -2 }, max: 100, parentAttributes: {}, parentType: -1, preIndex: 0, preParentType: 0, progress: 0, progressStyle: "?android:progressBarStyle", scaleX: 1.0, scaleY: 1.0, spinnerMode: 1, text: { hint: "", hintColor: 16777215, imeOption: 0, inputType: 1, line: 0, singleLine: 0, text: "", textColor: 16777215, textFont: "default_font", textSize: 12, textType: 0 }, translationX: 0.0, translationY: 0.0, type: 16 };
+
+function libraryItem(libType, useYn) {
+  return JSON.stringify({ adUnits: [], appId: "", configurations: {}, data: "", libType, reserved1: "", reserved2: "", reserved3: "", testDevices: [], useYn });
 }
 
-function buildSkeleton(appName, packageName) {
-  const scId = String(Date.now()).slice(-9);
-  const wsName = appName.replace(/[^A-Za-z0-9]/g, "") || "NewProject";
-  const config = {
-    my_app_name: appName,
-    my_ws_name: wsName,
-    my_sc_pkg_name: packageName,
-    sc_id: scId,
-    sc_ver_code: 1,
-    sc_ver_name: "1.0",
-    sketchware_ver: 150,
-    proj_type: 0,
-    custom_icon: false,
-    isIconAdaptive: false,
-    color_accent: -2634552,
-    color_primary: -13447885,
-    color_primary_dark: -13615201,
-    color_control_highlight: 587202559,
-    color_control_normal: -1979711488,
-  };
+function nowStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
 
-  const libOff = JSON.stringify({ adUnits: [], data: "", libType: 0, reserved1: "", reserved2: "", reserved3: "", testDevices: [], useYn: "N" });
-  const libCompat = JSON.stringify({ adUnits: [], data: "", libType: 0, reserved1: "", reserved2: "", reserved3: "", testDevices: [], useYn: "Y" });
+// Skeleton IDÊNTICO ao que o app grava ao criar um projeto novo
+function buildSkeleton(appName, packageName, forcedScId) {
+  const scId = forcedScId || String(Date.now()).slice(-9);
+  const wsName = appName.replace(/[^A-Za-z0-9]/g, "") || "NewProject";
+
+  const config = {
+    custom_icon: false,
+    sc_ver_code: "1",
+    my_ws_name: wsName,
+    color_accent: -8883068.0,
+    my_app_name: appName,
+    sc_ver_name: "1.0",
+    sc_id: scId,
+    color_primary: -8883068.0,
+    color_control_highlight: -1646350.0,
+    color_control_normal: -8883068.0,
+    my_sc_reg_dt: nowStamp(),
+    sketchware_ver: 150,
+    isIconAdaptive: false,
+    my_sc_pkg_name: packageName,
+    color_primary_dark: -8883068.0,
+  };
 
   const plain = {
     "list/project": JSON.stringify(config),
-    "data/file": `@activity\n${JSON.stringify({ fileName: "main", fileType: 0, keyboardSetting: 0, options: 1, orientation: 0, theme: 0 })}\n@customview\n`,
-    "data/view": `@main.xml\n${JSON.stringify(rootLinearView())}`,
-    "data/logic": "@main.java_var\n\n@main.java_list\n\n@main.java_components\n\n@main.java_events\n\n@main.java_func",
-    "data/resource": "[]",
-    "data/library": `@firebaseDB\n${libOff}\n@compat\n${libCompat}\n@admob\n${libOff}\n@googleMap\n${libOff}`,
+    "data/file": `@activity\n${JSON.stringify({ fileName: "main", fileType: 0, keyboardSetting: 0, options: 1, orientation: 0, theme: -1 })}\n@customview\n`,
+    "data/view": `@main.xml_fab\n${JSON.stringify(DEFAULT_FAB)}\n\n`,
+    "data/logic": "",
+    "data/resource": "@images\n@sounds\n@fonts\n",
+    "data/library": `@firebaseDB\n${libraryItem(0, "N")}\n@compat\n${libraryItem(1, "N")}\n@admob\n${libraryItem(2, "N")}\n@googleMap\n${libraryItem(3, "N")}\n`,
   };
 
   const files = {};
@@ -194,8 +187,18 @@ async function getProject(token, id) {
   return rpc("mcp_projects_get", { p_token: token, p_id: id });
 }
 
+async function upsert(token, id, name, data, scId) {
+  return rpc("mcp_projects_upsert", {
+    p_token: token,
+    p_id: id ?? null,
+    p_name: name,
+    p_data: data,
+    p_sc_id: scId ?? data?.sc_id ?? null,
+  });
+}
+
 function createServer(token) {
-  const server = new McpServer({ name: "sketup-mcp", version: "2.2.0" });
+  const server = new McpServer({ name: "sketup-mcp", version: "2.3.0" });
 
   server.registerTool(
     "list_projects",
@@ -223,22 +226,38 @@ function createServer(token) {
   server.registerTool(
     "create_project",
     {
-      description: "Cria um projeto novo válido (tela main com Linear raiz, arquivos criptografados no formato do app). Aparece no app após o sync.",
+      description: "Cria um projeto novo idêntico ao que o app cria (tela main + FAB, formato real). Aparece no app após o sync.",
       inputSchema: {
         app_name: z.string().describe("Nome do app (ex.: Minha Lista)"),
         package_name: z.string().describe("Pacote (ex.: com.meuapp.lista)"),
+        sc_id: z.string().optional().describe("Forçar um sc_id (uso interno)"),
       },
     },
-    async ({ app_name, package_name }) => {
-      const { scId, config, files } = buildSkeleton(app_name, package_name);
-      const row = await rpc("mcp_projects_upsert", {
-        p_token: token,
-        p_id: null,
-        p_name: app_name,
-        p_data: { sc_id: scId, config, files },
-        p_sc_id: scId,
-      });
+    async ({ app_name, package_name, sc_id }) => {
+      const { scId, config, files } = buildSkeleton(app_name, package_name, sc_id);
+      const row = await upsert(token, null, app_name, { sc_id: scId, config, files }, scId);
       return asText({ created: { id: row.id, name: row.name, sc_id: row.sc_id }, note: "Projeto criado na nuvem. Abra o app para sincronizar e baixar." });
+    }
+  );
+
+  server.registerTool(
+    "set_project_files",
+    {
+      description: "Regrava TODOS os arquivos de um projeto de uma vez (mapa caminho→texto puro; o servidor criptografa). Ideal para correções em lote.",
+      inputSchema: {
+        project_id: z.string(),
+        files: z.record(z.string()).describe("Mapa: 'list/project', 'data/view', ... → conteúdo texto puro"),
+      },
+    },
+    async ({ project_id, files: inputFiles }) => {
+      const row = await getProject(token, project_id);
+      const data = row?.data ?? {};
+      const files = {};
+      for (const [path, content] of Object.entries(inputFiles)) {
+        files[path] = encryptFile(content);
+      }
+      const saved = await upsert(token, row.id, row.name, { ...data, files }, data.sc_id ?? null);
+      return asText({ saved: true, updated_at: saved.updated_at, paths: Object.keys(inputFiles) });
     }
   );
 
@@ -264,7 +283,7 @@ function createServer(token) {
   server.registerTool(
     "save_file",
     {
-      description: "Grava um arquivo do projeto (texto puro — o servidor criptografa no formato do app). Marca o projeto como atualizado para o sync.",
+      description: "Grava um arquivo do projeto (texto puro — o servidor criptografa). Marca o projeto como atualizado para o sync.",
       inputSchema: {
         project_id: z.string(),
         path: z.string().describe("ex.: data/view"),
@@ -275,14 +294,7 @@ function createServer(token) {
       const row = await getProject(token, project_id);
       const data = row?.data ?? {};
       const files = { ...(data.files ?? {}), [path]: encryptFile(content) };
-      const newData = { ...data, files };
-      const saved = await rpc("mcp_projects_upsert", {
-        p_token: token,
-        p_id: row.id,
-        p_name: row.name,
-        p_data: newData,
-        p_sc_id: newData.sc_id ?? null,
-      });
+      const saved = await upsert(token, row.id, row.name, { ...data, files }, data.sc_id ?? null);
       return asText({ saved: true, updated_at: saved.updated_at, path });
     }
   );
@@ -326,7 +338,7 @@ const app = express();
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "sketup-mcp", version: "2.2.0", time: new Date().toISOString() });
+  res.json({ ok: true, service: "sketup-mcp", version: "2.3.0", time: new Date().toISOString() });
 });
 
 app.post("/mcp", async (req, res) => {
@@ -354,4 +366,4 @@ app.get("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: us
 app.delete("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: use POST" }));
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`sketup-mcp v2.2 ouvindo na porta ${port}`));
+app.listen(port, () => console.log(`sketup-mcp v2.3 ouvindo na porta ${port}`));
