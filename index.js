@@ -13,11 +13,12 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 // ---- Formato de arquivo do app ----
-// A MAIORIA dos arquivos de projeto = bytes AES-128-CBC, chave = IV = "sketchwaresecure".
-// Na nuvem trafegam como { "__b64": "<base64 dos bytes>" }.
-// EXCEÇÃO: alguns arquivos são TEXTO PURO no app (FileUtil.readFile sem decriptar):
+// APENAS estes 6 arquivos são criptografados (AES-128-CBC, chave = IV = "sketchwaresecure"):
 const SK_KEY = Buffer.from("sketchwaresecure", "utf8");
-const PLAIN_FILES = new Set(["data/permission", "data/project_config", "data/import"]);
+const ENCRYPTED_FILES = new Set([
+  "list/project", "data/view", "data/logic", "data/file", "data/resource", "data/library",
+]);
+// TODO O RESTO é texto puro no app (permission, Injection/*, files/java/*, service...).
 
 function encryptFile(plain) {
   const cipher = crypto.createCipheriv("aes-128-cbc", SK_KEY, SK_KEY);
@@ -25,9 +26,9 @@ function encryptFile(plain) {
   return { __b64: encrypted.toString("base64") };
 }
 
-// Grava respeitando o tipo do arquivo: texto puro ou criptografado
+// Grava respeitando o tipo do arquivo: criptografado só os 6 conhecidos
 function encodeFile(path, plain) {
-  return PLAIN_FILES.has(path) ? plain : encryptFile(plain);
+  return ENCRYPTED_FILES.has(path) ? encryptFile(plain) : plain;
 }
 
 function decryptFile(value) {
@@ -40,6 +41,10 @@ function decryptFile(value) {
     if (typeof value === "string") return value; // arquivo texto puro
     return value;
   } catch {
+    // pode ser __b64 de bytes não-AES (upload antigo de arquivo texto puro)
+    if (value && typeof value === "object" && typeof value.__b64 === "string") {
+      try { return Buffer.from(value.__b64, "base64").toString("utf8"); } catch { return null; }
+    }
     return typeof value === "string" ? value : null;
   }
 }
@@ -73,14 +78,6 @@ function asText(value) {
 }
 
 // ---- Estrutura REAL de um projeto SKET-UP (extraída de um projeto criado pelo app) ----
-// list/project        → config (criptografado)
-// data/file           → seções @activity / @customview (criptografado)
-// data/view           → seções @tela.xml / @tela.xml_fab (criptografado)
-// data/logic          → seções @Tela.java_* (criptografado)
-// data/resource       → seções @images/@sounds/@fonts (criptografado)
-// data/library        → seções @firebaseDB/@compat/@admob/@googleMap (criptografado)
-// data/permission     → array JSON de permissões (TEXTO PURO)
-
 const STANDARD_FILES = ["list/project", "data/view", "data/logic", "data/file", "data/resource", "data/library", "data/permission"];
 
 const VIEW_TYPES = {
@@ -207,7 +204,7 @@ async function upsert(token, id, name, data, scId) {
 }
 
 function createServer(token) {
-  const server = new McpServer({ name: "sketup-mcp", version: "2.4.0" });
+  const server = new McpServer({ name: "sketup-mcp", version: "2.5.0" });
 
   server.registerTool(
     "list_projects",
@@ -218,7 +215,7 @@ function createServer(token) {
   server.registerTool(
     "get_project",
     {
-      description: "Lê um projeto completo: config + arquivos descriptografados (list/project, data/view, data/logic...)",
+      description: "Lê um projeto completo: config + arquivos (descriptografa só os 6 arquivos criptografados do app)",
       inputSchema: { id: z.string().describe("ID do projeto") },
     },
     async ({ id }) => {
@@ -255,7 +252,7 @@ function createServer(token) {
       description: "Regrava TODOS os arquivos de um projeto de uma vez (mapa caminho→texto puro; o servidor aplica o formato certo de cada arquivo). Ideal para correções em lote.",
       inputSchema: {
         project_id: z.string(),
-        files: z.record(z.string()).describe("Mapa: 'list/project', 'data/view', ... → conteúdo texto puro"),
+        files: z.record(z.string()).describe("Mapa: 'list/project', 'data/view', 'data/files/java/X.java', ... → conteúdo texto puro"),
       },
     },
     async ({ project_id, files: inputFiles }) => {
@@ -273,7 +270,7 @@ function createServer(token) {
   server.registerTool(
     "get_file",
     {
-      description: "Lê um arquivo do projeto (list/project, data/view, data/logic, data/file, data/resource, data/library, data/permission) descriptografado",
+      description: "Lê um arquivo do projeto descriptografado (se for um dos 6 criptografados)",
       inputSchema: {
         project_id: z.string(),
         path: z.string().describe("ex.: data/view"),
@@ -292,11 +289,11 @@ function createServer(token) {
   server.registerTool(
     "save_file",
     {
-      description: "Grava um arquivo do projeto (texto puro — o servidor aplica o formato certo: criptografa ou não conforme o tipo). Marca o projeto como atualizado para o sync.",
+      description: "Grava um arquivo do projeto (texto puro — o servidor criptografa só se for um dos 6 arquivos criptografados). Marca o projeto como atualizado para o sync.",
       inputSchema: {
         project_id: z.string(),
-        path: z.string().describe("ex.: data/view"),
-        content: z.string().describe("Conteúdo em texto puro (formato do arquivo do app)"),
+        path: z.string().describe("ex.: data/view ou data/files/java/Meu.java"),
+        content: z.string().describe("Conteúdo em texto puro"),
       },
     },
     async ({ project_id, path, content }) => {
@@ -347,7 +344,7 @@ const app = express();
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "sketup-mcp", version: "2.4.0", time: new Date().toISOString() });
+  res.json({ ok: true, service: "sketup-mcp", version: "2.5.0", time: new Date().toISOString() });
 });
 
 app.post("/mcp", async (req, res) => {
@@ -375,4 +372,4 @@ app.get("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: us
 app.delete("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: use POST" }));
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`sketup-mcp v2.4 ouvindo na porta ${port}`));
+app.listen(port, () => console.log(`sketup-mcp v2.5 ouvindo na porta ${port}`));
