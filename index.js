@@ -13,14 +13,21 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 // ---- Formato de arquivo do app ----
-// Arquivos de projeto = bytes criptografados: AES-128-CBC(texto UTF-8), chave = IV = "sketchwaresecure".
-// Na nuvem trafegam como { "__b64": "<base64 dos bytes criptografados>" }.
+// A MAIORIA dos arquivos de projeto = bytes AES-128-CBC, chave = IV = "sketchwaresecure".
+// Na nuvem trafegam como { "__b64": "<base64 dos bytes>" }.
+// EXCEÇÃO: alguns arquivos são TEXTO PURO no app (FileUtil.readFile sem decriptar):
 const SK_KEY = Buffer.from("sketchwaresecure", "utf8");
+const PLAIN_FILES = new Set(["data/permission", "data/project_config", "data/import"]);
 
 function encryptFile(plain) {
   const cipher = crypto.createCipheriv("aes-128-cbc", SK_KEY, SK_KEY);
   const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
   return { __b64: encrypted.toString("base64") };
+}
+
+// Grava respeitando o tipo do arquivo: texto puro ou criptografado
+function encodeFile(path, plain) {
+  return PLAIN_FILES.has(path) ? plain : encryptFile(plain);
 }
 
 function decryptFile(value) {
@@ -30,7 +37,7 @@ function decryptFile(value) {
       const decipher = crypto.createDecipheriv("aes-128-cbc", SK_KEY, SK_KEY);
       return Buffer.concat([decipher.update(raw), decipher.final()]).toString("utf8");
     }
-    if (typeof value === "string") return value;
+    if (typeof value === "string") return value; // arquivo texto puro
     return value;
   } catch {
     return typeof value === "string" ? value : null;
@@ -66,14 +73,15 @@ function asText(value) {
 }
 
 // ---- Estrutura REAL de um projeto SKET-UP (extraída de um projeto criado pelo app) ----
-// list/project        → config (versões como texto, cores como decimais, my_sc_reg_dt)
-// data/file           → seções @activity / @customview (1 JSON por linha)
-// data/view           → seções @tela.xml_fab (FAB) e @tela.xml (1 JSON de widget por linha)
-// data/logic          → vazio em projeto novo
-// data/resource       → seções @images/@sounds/@fonts
-// data/library        → seções @firebaseDB/@compat/@admob/@googleMap com libType 0/1/2/3
+// list/project        → config (criptografado)
+// data/file           → seções @activity / @customview (criptografado)
+// data/view           → seções @tela.xml / @tela.xml_fab (criptografado)
+// data/logic          → seções @Tela.java_* (criptografado)
+// data/resource       → seções @images/@sounds/@fonts (criptografado)
+// data/library        → seções @firebaseDB/@compat/@admob/@googleMap (criptografado)
+// data/permission     → array JSON de permissões (TEXTO PURO)
 
-const STANDARD_FILES = ["list/project", "data/view", "data/logic", "data/file", "data/resource", "data/library"];
+const STANDARD_FILES = ["list/project", "data/view", "data/logic", "data/file", "data/resource", "data/library", "data/permission"];
 
 const VIEW_TYPES = {
   0: "LinearLayout", 1: "RelativeLayout", 2: "HScrollView", 3: "Button", 4: "TextView",
@@ -125,11 +133,12 @@ function buildSkeleton(appName, packageName, forcedScId) {
     "data/logic": "",
     "data/resource": "@images\n@sounds\n@fonts\n",
     "data/library": `@firebaseDB\n${libraryItem(0, "N")}\n@compat\n${libraryItem(1, "N")}\n@admob\n${libraryItem(2, "N")}\n@googleMap\n${libraryItem(3, "N")}\n`,
+    "data/permission": "[]",
   };
 
   const files = {};
   for (const [path, content] of Object.entries(plain)) {
-    files[path] = encryptFile(content);
+    files[path] = encodeFile(path, content);
   }
   return { scId, config, files };
 }
@@ -198,7 +207,7 @@ async function upsert(token, id, name, data, scId) {
 }
 
 function createServer(token) {
-  const server = new McpServer({ name: "sketup-mcp", version: "2.3.0" });
+  const server = new McpServer({ name: "sketup-mcp", version: "2.4.0" });
 
   server.registerTool(
     "list_projects",
@@ -243,7 +252,7 @@ function createServer(token) {
   server.registerTool(
     "set_project_files",
     {
-      description: "Regrava TODOS os arquivos de um projeto de uma vez (mapa caminho→texto puro; o servidor criptografa). Ideal para correções em lote.",
+      description: "Regrava TODOS os arquivos de um projeto de uma vez (mapa caminho→texto puro; o servidor aplica o formato certo de cada arquivo). Ideal para correções em lote.",
       inputSchema: {
         project_id: z.string(),
         files: z.record(z.string()).describe("Mapa: 'list/project', 'data/view', ... → conteúdo texto puro"),
@@ -254,7 +263,7 @@ function createServer(token) {
       const data = row?.data ?? {};
       const files = {};
       for (const [path, content] of Object.entries(inputFiles)) {
-        files[path] = encryptFile(content);
+        files[path] = encodeFile(path, content);
       }
       const saved = await upsert(token, row.id, row.name, { ...data, files }, data.sc_id ?? null);
       return asText({ saved: true, updated_at: saved.updated_at, paths: Object.keys(inputFiles) });
@@ -264,7 +273,7 @@ function createServer(token) {
   server.registerTool(
     "get_file",
     {
-      description: "Lê um arquivo do projeto (list/project, data/view, data/logic, data/file, data/resource, data/library) descriptografado",
+      description: "Lê um arquivo do projeto (list/project, data/view, data/logic, data/file, data/resource, data/library, data/permission) descriptografado",
       inputSchema: {
         project_id: z.string(),
         path: z.string().describe("ex.: data/view"),
@@ -283,7 +292,7 @@ function createServer(token) {
   server.registerTool(
     "save_file",
     {
-      description: "Grava um arquivo do projeto (texto puro — o servidor criptografa). Marca o projeto como atualizado para o sync.",
+      description: "Grava um arquivo do projeto (texto puro — o servidor aplica o formato certo: criptografa ou não conforme o tipo). Marca o projeto como atualizado para o sync.",
       inputSchema: {
         project_id: z.string(),
         path: z.string().describe("ex.: data/view"),
@@ -293,7 +302,7 @@ function createServer(token) {
     async ({ project_id, path, content }) => {
       const row = await getProject(token, project_id);
       const data = row?.data ?? {};
-      const files = { ...(data.files ?? {}), [path]: encryptFile(content) };
+      const files = { ...(data.files ?? {}), [path]: encodeFile(path, content) };
       const saved = await upsert(token, row.id, row.name, { ...data, files }, data.sc_id ?? null);
       return asText({ saved: true, updated_at: saved.updated_at, path });
     }
@@ -338,7 +347,7 @@ const app = express();
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "sketup-mcp", version: "2.3.0", time: new Date().toISOString() });
+  res.json({ ok: true, service: "sketup-mcp", version: "2.4.0", time: new Date().toISOString() });
 });
 
 app.post("/mcp", async (req, res) => {
@@ -366,4 +375,4 @@ app.get("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: us
 app.delete("/mcp", (_req, res) => res.status(405).json({ error: "Modo stateless: use POST" }));
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`sketup-mcp v2.3 ouvindo na porta ${port}`));
+app.listen(port, () => console.log(`sketup-mcp v2.4 ouvindo na porta ${port}`));
